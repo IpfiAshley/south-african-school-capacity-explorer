@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+data/student-dropout-success.zip
+data/student-dropout-success/
+data/student-performance.zip
+data/student-performance/
+analyze.py

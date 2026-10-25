@@ -17,6 +17,9 @@ def main() -> None:
             (df["Type_DoE"] == "ORDINARY SCHOOL")].copy()
     for col in ("Learners2025", "Educators2025", "GIS_Lat", "GIS_Long"):
         df[col] = pd.to_numeric(df[col], errors="coerce")
+    # Keep only valid South African degree coordinates; malformed points can distort district centroids.
+    in_country = df["GIS_Long"].between(16, 33) & df["GIS_Lat"].between(-36, -21)
+    df.loc[~in_country, ["GIS_Long", "GIS_Lat"]] = float("nan")
     # Keep school counts separate from ratios when staffing/enrollment data is missing.
     ratio_df = df[(df["Learners2025"] > 0) & (df["Educators2025"] > 0)].copy()
     ratio_df["learner_educator_ratio"] = ratio_df["Learners2025"] / ratio_df["Educators2025"]
@@ -27,6 +30,8 @@ def main() -> None:
         "LP": "Limpopo", "MP": "Mpumalanga", "NC": "Northern Cape", "NW": "North West", "WC": "Western Cape",
     })
     ratio_df["EIDistrict"] = ratio_df["EIDistrict"].fillna("District not recorded").astype(str).str.title()
+    ratio_df["QuintileLabel"] = ratio_df["Quintile"].where(ratio_df["Quintile"].isin(["Q1", "Q2", "Q3", "Q4", "Q5"]), "Unknown")
+    ratio_df["RuralLabel"] = ratio_df["Urban_Rural"].where(ratio_df["Urban_Rural"].isin(["Rural", "Urban"]), "Unknown")
 
     def summarize(keys: list[str]) -> list[dict]:
         result = []
@@ -59,6 +64,29 @@ def main() -> None:
         return result
 
     usable = ratio_df
+    school_records = []
+    for _, row in usable.iterrows():
+        school_records.append({
+            "name": str(row["Official_Institution_Name"]), "province": row["Province"], "district": row["EIDistrict"],
+            "learners": int(row["Learners2025"]), "educators": int(row["Educators2025"]),
+            "ratio": round(float(row["learner_educator_ratio"]), 2),
+            "quintile": row["QuintileLabel"], "setting": row["RuralLabel"],
+            "latitude": round(float(row["GIS_Lat"]), 5) if pd.notna(row["GIS_Lat"]) else None,
+            "longitude": round(float(row["GIS_Long"]), 5) if pd.notna(row["GIS_Long"]) else None,
+        })
+    ratio_percentile = usable["learner_educator_ratio"].rank(pct=True, method="average")
+    quintile_points = {"Q1": 30, "Q2": 22, "Q3": 14, "Q4": 7, "Q5": 0, "Unknown": 0}
+    for position, school in enumerate(school_records):
+        ratio_pct = float(ratio_percentile.iloc[position])
+        context_points = quintile_points[school["quintile"]]
+        school["support_score"] = round(70 * ratio_pct + context_points)
+        school["support_tier"] = "High review priority" if school["support_score"] >= 70 else ("Elevated review priority" if school["support_score"] >= 45 else "Routine review")
+        drivers = []
+        if ratio_pct >= 0.75:
+            drivers.append("Learner-to-educator ratio in the highest quarter")
+        if school["quintile"] in ("Q1", "Q2"):
+            drivers.append(f"{school['quintile']} quintile context")
+        school["support_drivers"] = drivers or ["No elevated indicator in this screen"]
     by_province = summarize(["Province"])
     by_district = summarize(["Province", "EIDistrict"])
     total_learners = int(usable["Learners2025"].sum())
@@ -92,6 +120,10 @@ def main() -> None:
         "sources": [{"name": "DBE EMIS Downloads — Schools Masterlist", "url": "https://www.education.gov.za/Programmes/EMIS/EMISDownloads.aspx"}],
     }
     APP.mkdir(exist_ok=True)
+    # School-level details are generated locally for the visit planner and are never embedded in the public dashboard JSON.
+    private_schools = school_records
+    local_js = "window.SCHOOL_VISIT_DATA=" + json.dumps(private_schools, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/") + ";"
+    (APP / "schools.local.js").write_text(local_js, encoding="utf-8")
     (APP / "data.json").write_text(json.dumps(stats, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     template = APP / "index.template.html"
     page = APP / "index.html"

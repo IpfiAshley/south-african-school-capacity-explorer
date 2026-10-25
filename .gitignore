@@ -5,3 +5,5 @@ data/student-dropout-success/
 data/student-performance.zip
 data/student-performance/
 analyze.py
+
+app/schools.local.js
